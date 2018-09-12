@@ -1,2 +1,8 @@
 passwords.txt
 *.csv
+.DS_Store
+*.ipynb_checkpoints
+__pycache__/
+*.json
+*.zip
+*Tests.ipynb

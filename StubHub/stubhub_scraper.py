@@ -1,18 +1,18 @@
-# import required packages
 import requests
 import json
+import re
 import base64
 import pandas as pd
 import numpy as np
-import re
 from time import sleep
 import datetime
 
-
-class stubhub_scrape(object):
+class StubHub_Scrape(object):
 
     # Initialize class
-    def __init__(self, sleep_time=6, test_mode = False):
+    def __init__(self, sleep_time=6, test_mode = False,
+                scrape_date = 'today',
+                events_raw = None, inventory_raw = None):
 
         # Set the amount of time to sleep after each call
         self.__sleep_time = sleep_time
@@ -20,19 +20,19 @@ class stubhub_scrape(object):
         # Store test mode indicator
         self.__test_mode = test_mode
 
-        # Store date of initialization
-        self.scrape_date = datetime.datetime.now().strftime('%Y_%m_%d')
+        # Store date of initialization or user-entered date string
+        self.scrape_date = datetime.datetime.now().strftime('%Y_%m_%d') if scrape_date == 'today'\
+                                else scrape_date
 
-        # Store the access token... initialize as none
+        # Store the query headers... initialize as none
         self.__headers = None
-        self._gen_auth_header_()
 
         # Save the events dataframe... initialize as none
-        self._events_raw = None
+        self._events_raw = events_raw
         self.events = None
 
         # Save the listings dataframe... initialize as none
-        self._inventory_raw = None
+        self._inventory_raw = inventory_raw
         self.tickets = None
 
         # Set the list of cities we are searching for
@@ -43,8 +43,6 @@ class stubhub_scrape(object):
             'Los Angeles', 'Hollywood', 'West Hollywood', 'Pasadena',
             'Boston', 'Medford']
         self.__city_list = '"' + '"  |"'.join(city_list) + '"'
-
-
 
 
     # Method to generate headers with authentication
@@ -59,6 +57,7 @@ class stubhub_scrape(object):
             consumer_secret = re.search("'.*", text[3]).group().replace("'", "")
             stubhub_username = re.search("'.*", text[5]).group().replace("'", "")
             stubhub_password = re.search("'.*", text[6]).group().replace("'", "")
+
 
         # Generate and encode token
         combo = consumer_key + ':' + consumer_secret
@@ -105,12 +104,22 @@ class stubhub_scrape(object):
         sleep(self.__sleep_time)
 
 
+    # Method to check whether headers have been generated;
+    ## generates headers if not
+    def _verify_or_gen_auth_(self):
+        if self.__headers == None:
+            self._gen_auth_header_()
+        else:
+            pass
+
+
     # Method to get raw events list in dict form
     def _get_events_raw(self):
+        self._verify_or_gen_auth_()
 
         # Define events url and query params
         events_url = 'https://api.stubhub.com/search/catalog/events/v3'
-        params = {'city': self.__city_list, 'q': 'concert',
+        params = {'city': self.__city_list, 'q': 'concert', 'sort': 'id',
          'start': 0, 'rows': 500, 'fieldList': '*,ticketInfo'}
 
         # Run the first request; get the total number of events
@@ -142,7 +151,7 @@ class stubhub_scrape(object):
 
             # Escape the while loop after two calls if in test mode
             if self.__test_mode and params['start']>1000:
-                print('Stopping gathering events... test mode!')
+                print('No more events gathering... test mode!')
                 break
 
         print('Got events!')
@@ -178,15 +187,22 @@ class stubhub_scrape(object):
         events_df['performersCollection'] = events_df.performersCollection.fillna('none')
         events_df.apply(lambda event: None if event['performersCollection'] == 'none'
                                     else
-                                        [perf.update({'event_id': event['id']})
+                                        [perf.update({'event_id': event['id'],
+                                                    'dt_accessed': event['dt_accessed']})
                                                 for perf in event['performersCollection']], axis=1)
         events_perf = pd.DataFrame(
                             events_df.loc[events_df['performersCollection'] != 'none', 'performersCollection'].
                                         apply(pd.Series).stack().tolist())
         events_perf = events_perf.rename(index=str, columns={'id': 'performer_id', 'name': 'performer_name'})
+        events_perf = events_perf.drop(['seoURI', 'webURI'], axis=1, errors='ignore')
+
+        # Generate event score dataframe
+        events_scores = events_df.loc[:, ['id', 'score', 'dt_accessed']]
+        events_scores['date'] = self.scrape_date
+        events_scores = events_scores.rename(index=str, columns={'id': 'event_id'})
 
         # Generate event ticket summary dataframe
-        # Add the event id and dt accessed to the dictionary
+        ## Add the event id and dt accessed to the dictionary
         events_df['ticketInfo'] = events_df.ticketInfo.fillna('none')
         events_df.apply(lambda event: None if event['ticketInfo'] == 'none'
                                             else event['ticketInfo'].update(
@@ -197,11 +213,16 @@ class stubhub_scrape(object):
                                                         ticketInfo.apply(pd.Series)
         # Remove unnecessary dictionary-like fields from dataframe
         events_ticket_summary = events_ticket_summary.loc[:, events_ticket_summary.columns.str.find('With') == -1]
+        # Add date
+        events_ticket_summary['date'] = self.scrape_date
 
         # Generate venues DataFrame
+        events_df.apply(lambda x: x['venue'].update({'dt_accessed': x['dt_accessed']}), axis=1)
         venues = events_df.venue.apply(pd.Series)
         venues = venues.drop_duplicates(subset = 'id')
         venues = venues.rename(index=str, columns={'id': 'venue_id'})
+        venues = venues.drop(['webURI', 'seoURI', 'venueUrl', 'venueConfigId'],
+                            axis=1, errors='ignore')
 
         # Label events dataframe with venue id
         events_df['venue_id'] = events_df.venue.apply(lambda i: i['id'])
@@ -209,20 +230,26 @@ class stubhub_scrape(object):
         # Get name of venue configuration
         events_df['venue_config'] = events_df.venueConfiguration.apply(lambda x: x['name'])
 
+        # Tag events df with date
+        events_df['date'] = self.scrape_date
+
         # Drop unwanted columns
-        events_df = events_df.drop(['ancestors', 'associatedEvents', 'bobId',
-                                    'catalogTemplate', 'categories', 'categoriesCollection',
+        events_df = events_df.drop(['ancestors', 'associatedEvents', 'attributes', 'bobId',
+                                    'catalogTemplate', 'categories', 'categoriesCollection', 'defaultLocale',
                                     'displayAttributes','eventAttributes', 'groupings',
                                     'groupingsCollection', 'imageUrl', 'images', 'locale',
-                                    'mobileAttributes', 'performers', 'performersCollection',
+                                    'mobileAttributes', 'performers', 'performersCollection', 'score',
+                                    'seoURI', 'webURI',
                                     'sourceId', 'status', 'ticketInfo','venue', 'venueConfiguration'],
-                                     axis = 1)
+                                     axis = 1, errors = 'ignore')
 
         events_df = events_df.rename(index=str, columns={'id': 'event_id'})
 
         # Save events dataframes
         self.events = {'events_df': events_df, 'events_perf': events_perf,
-                        'events_ticket_summary': events_ticket_summary}
+                        'events_scores': events_scores,
+                        'events_ticket_summary': events_ticket_summary,
+                        'venues_df': venues}
 
         print('Events parsed!')
 
@@ -241,6 +268,7 @@ class stubhub_scrape(object):
 
     # Method to gather ticket inventory (json objects)
     def _get_inventory(self):
+        self._verify_or_gen_auth_()
 
         # Get events if we have not yet
         if not self.events:
@@ -325,16 +353,26 @@ class stubhub_scrape(object):
             apply(pd.Series).stack().reset_index()
         tickets_deliv_type = tickets_deliv_type.drop('level_1', axis=1)
         tickets_deliv_type = tickets_deliv_type.rename(index=str, columns={0: "listings_deliv_type"})
+        tickets_deliv_type = tickets_deliv_type.merge(tickets_df[['listingId', 'dt_accessed']], on='listingId')
+        tickets_deliv_type['date'] = self.scrape_date
+
 
         # Generate delivery method df
         tickets_deliv_method = tickets_df.set_index('listingId')['deliveryMethodList'].\
             apply(pd.Series).stack().reset_index()
         tickets_deliv_method = tickets_deliv_method.drop('level_1', axis=1)
         tickets_deliv_method = tickets_deliv_method.rename(index=str, columns={0: "listings_deliv_method"})
+        tickets_deliv_method = tickets_deliv_method.merge(tickets_df[['listingId', 'dt_accessed']], on='listingId')
+        tickets_deliv_method['date'] = self.scrape_date
+
 
         # Get face value from dict
-        tickets_df['faceValue'] = tickets_df.faceValue.apply(lambda x: np.NaN if pd.isnull(x)
-                                    else x['amount'])
+        ## Use try except because sometimes we don't get face value
+        try:
+            tickets_df['faceValue'] = tickets_df.faceValue.apply(lambda x: np.NaN if pd.isnull(x)
+                                        else x['amount'])
+        except:
+            tickets_df['faceValue'] = np.NaN
 
         # Generate listing attribute df
         ## Use a try statement because sometimes we don't get the listing attr list back from the API
@@ -344,7 +382,7 @@ class stubhub_scrape(object):
             tickets_listing_attr = tickets_listing_attr.drop('level_1', axis=1)
             tickets_listing_attr = tickets_listing_attr.rename(index=str, columns={0: "listings_listing_attr"})
         except:
-            pass
+            tickets_listing_attr = 'none'
 
         # Get ticket price from dict
         tickets_df['listingPrice'] = tickets_df.listingPrice.apply(lambda x: x['amount'])
@@ -354,18 +392,24 @@ class stubhub_scrape(object):
             apply(pd.Series).stack().reset_index()
         tickets_splits_df = tickets_splits_df.drop('level_1', axis=1)
         tickets_splits_df = tickets_splits_df.rename(index=str, columns={0: "tickets_splits_option"})
+        tickets_splits_df['date'] = self.scrape_date
+        tickets_splits_df = tickets_splits_df.merge(tickets_df[['listingId', 'dt_accessed']], on='listingId')
+
+        # Add date
+        tickets_df['date'] = self.scrape_date
 
         # Drop unwanted columns
         tickets_df = tickets_df.drop(['businessGuid', 'currentPrice', 'deliveryMethodList',
-                                        'deliveryTypeList', 'listingAttributeList', 'sellerOwnInd',
-                                        'splitVector'],
-                                        axis = 1)
+                                        'deliveryTypeList', 'listingAttributeList', 'listingAttributeCategoryList',
+                                        'sellerOwnInd', 'splitVector'],
+                                        axis = 1, errors = 'ignore')
 
         # Save ticket dataframes
         self.tickets = {'tickets_df': tickets_df,
                         'tickets_deliv_type': tickets_deliv_type,
                         'tickets_deliv_method': tickets_deliv_method,
-                        'tickets_listing_attr': tickets_listing_attr}
+                        'tickets_listing_attr': tickets_listing_attr,
+                        'tickets_splits': tickets_splits_df}
 
 
 
@@ -380,24 +424,3 @@ class stubhub_scrape(object):
         self._parse_inventory()
 
         print('Success!')
-
-
-
-
-scraper = stubhub_scrape(test_mode=False)
-scraper.get_tickets()
-
-# Pickle json / dict format in case I want to reprocess later
-import pickle
-with open('Data/events_json_{}'.format(scraper.scrape_date), 'wb') as file:
-    pickle.dump(scraper._events_raw, file)
-with open('Data/inventory_json_{}'.format(scraper.scrape_date), 'wb') as file:
-    pickle.dump(scraper._inventory_raw, file)
-
-# Save dfs as CSVs
-combined_df_dict = {**scraper.events, **scraper.tickets}
-for key in combined_df_dict:
-    df = combined_df_dict[key]
-    file_name = 'Data/tickets_{}_{}.csv'.format(key, scraper.scrape_date)
-    df.to_csv(file_name, index=False)
-    print('{} written'.format(file_name))
