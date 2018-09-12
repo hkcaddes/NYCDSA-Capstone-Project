@@ -1,3 +1,4 @@
+spotify_client_credentials.txt
 passwords.txt
 *.csv
 .DS_Store
@@ -8,3 +9,4 @@ __pycache__/
 *Tests.ipynb
 *.pdf
 *.xlsx
+
