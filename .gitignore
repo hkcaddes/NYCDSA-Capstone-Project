@@ -1,3 +1,8 @@
 *.csv
 *.pdf
 *.xlsx
+creds*
+*.ropeproject/***
+data/**
+*.sql
+*.txt
