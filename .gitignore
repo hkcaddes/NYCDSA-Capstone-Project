@@ -1,4 +1,5 @@
 spotify_client_credentials.txt
+s3_credentials.txt
 passwords.txt
 *.csv
 .DS_Store
